@@ -1,0 +1,129 @@
+/*
+* IoT Hub Raspberry Pi NodeJS - Microsoft Sample Code - Copyright (c) 2017 - Licensed MIT
+*/
+
+require('dotenv').config();  // Load environment variables from .env file
+const wpi = require('wiring-pi');
+const Client = require('azure-iot-device').Client;
+const Message = require('azure-iot-device').Message;
+const Protocol = require('azure-iot-device-mqtt').Mqtt;
+const BME280 = require('bme280-sensor');
+
+const BME280_OPTION = {
+  i2cBusNo: 1, // defaults to 1
+  i2cAddress: BME280.BME280_DEFAULT_I2C_ADDRESS() // defaults to 0x77
+};
+
+const connectionString = process.env.IOTHUB_CONNECTION_STRING;
+const LEDPin = 4;
+
+if (!connectionString) {
+  console.error('Error: IOTHUB_CONNECTION_STRING is not set in environment variables.');
+  process.exit(1);
+}
+
+let sendingMessage = false;
+let messageId = 0;
+let client, sensor;
+let blinkLEDTimeout = null;
+
+function getMessage(cb) {
+  messageId++;
+  sensor.readSensorData()
+    .then(function (data) {
+      cb(JSON.stringify({
+        messageId: messageId,
+        deviceId: 'Raspberry Pi Web Client',
+        temperature: data.temperature_C,
+        humidity: data.humidity
+      }), data.temperature_C > 30);
+    })
+    .catch(function (err) {
+      console.error('Failed to read out sensor data: ' + err);
+    });
+}
+
+function sendMessage() {
+  if (!sendingMessage) { return; }
+
+  getMessage(function (content, temperatureAlert) {
+    const message = new Message(content);
+    message.properties.add('temperatureAlert', temperatureAlert.toString());
+    console.log('Sending message: ' + content);
+    client.sendEvent(message, function (err) {
+      if (err) {
+        console.error('Failed to send message to Azure IoT Hub');
+      } else {
+        blinkLED();
+        console.log('Message sent to Azure IoT Hub');
+      }
+    });
+  });
+}
+
+function onStart(request, response) {
+  console.log('Try to invoke method start(' + request.payload + ')');
+  sendingMessage = true;
+
+  response.send(200, 'Successfully started sending messages to cloud', function (err) {
+    if (err) {
+      console.error('[IoT hub Client] Failed sending a method response:\n' + err.message);
+    }
+  });
+}
+
+function onStop(request, response) {
+  console.log('Try to invoke method stop(' + request.payload + ')');
+  sendingMessage = false;
+
+  response.send(200, 'Successfully stopped sending messages to cloud', function (err) {
+    if (err) {
+      console.error('[IoT hub Client] Failed sending a method response:\n' + err.message);
+    }
+  });
+}
+
+function receiveMessageCallback(msg) {
+  blinkLED();
+  const message = msg.getData().toString('utf-8');
+  client.complete(msg, function () {
+    console.log('Received message: ' + message);
+  });
+}
+
+function blinkLED() {
+  if (blinkLEDTimeout) {
+    clearTimeout(blinkLEDTimeout);
+  }
+  wpi.digitalWrite(LEDPin, 1);
+  blinkLEDTimeout = setTimeout(function () {
+    wpi.digitalWrite(LEDPin, 0);
+  }, 500);
+}
+
+// Setup GPIO and sensor
+wpi.setup('wpi');
+wpi.pinMode(LEDPin, wpi.OUTPUT);
+sensor = new BME280(BME280_OPTION);
+sensor.init()
+  .then(function () {
+    sendingMessage = true;
+  })
+  .catch(function (err) {
+    console.error(err.message || err);
+  });
+
+// Create IoT Hub client
+client = Client.fromConnectionString(connectionString, Protocol);
+
+client.open(function (err) {
+  if (err) {
+    console.error('[IoT hub Client] Connect error: ' + err.message);
+    return;
+  }
+
+  client.onDeviceMethod('start', onStart);
+  client.onDeviceMethod('stop', onStop);
+  client.on('message', receiveMessageCallback);
+  setInterval(sendMessage, 2000);
+});
